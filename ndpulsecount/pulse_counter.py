@@ -156,6 +156,8 @@ class PulseCounter():
     def purge_memory(self):
         command = transcode.encode_settings(purge_memory=True)
         self.write_command(command)
+        with self.counter_queue.mutex:
+            self.counter_queue.queue.clear()
 
     def enable_send(self):
         command = transcode.encode_settings(enable_send_counts=True)
@@ -183,6 +185,11 @@ class PulseCounter():
     def get_memory_usage(self):
         command = transcode.encode_settings(request_status=True)
         self.write_command(command) 
+
+    def software_trigger(self):
+        #This internally forces the device to record the counts. The softeware equivalent of the hardware trigger.
+        command = transcode.encode_settings(request_counter_value=True)
+        self.write_command(command)
 
     def get_counts(self, timeout=None):
         try:

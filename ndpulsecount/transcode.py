@@ -100,9 +100,9 @@ def encode_settings(enable_counter=None, enable_send_counts=None, holdoff_time=N
     '''
     request_counter_value_tag = encode_lookup['request_counter_value'][request_counter_value] << 29 #Note, this is a bit of a hack. I couldnt be bothered making a whole other tag byte.
 
-    holdoff_time_val = 0 | request_counter_value_tag
+    holdoff_time_val = 0
     if holdoff_time         is not None: holdoff_time_val = holdoff_time | (1 << 28)
-
+    holdoff_time_val = holdoff_time_val | request_counter_value_tag
     enable_record_tag       = encode_lookup['enable_record'][enable_counter] << 0
     enable_send_record_tag  = encode_lookup['enable_send_record'][enable_send_counts] << 2
     request_status_tag      = encode_lookup['request_status'][request_status] << 4
