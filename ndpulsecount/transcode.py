@@ -1,4 +1,6 @@
 import struct
+from numba import jit
+import numpy as np
 
 def decode_internal_error(message):
     ''' Messagein identifier:  1 byte: 200
@@ -155,3 +157,57 @@ def print_bytes(bytemessage):
     for letter in bytemessage[::-1]:
         print('{:08b}'.format(letter), end =" ")
     print('')
+
+@jit(nopython=True, cache=True)
+def quick_decode(remaining_data, new_data):
+    #both inputs are arrays
+    data = np.concatenate((remaining_data, new_data))#.astype(np.int64)
+    counts_idx = 0
+    counts = np.zeros(600, dtype=np.int64)
+    other_messages_idx = 0
+    other_messages = np.zeros((20, 9), dtype=np.uint8)
+    out_of_sync = False
+    N = data.size
+    idx = 0
+    # find out how many bytes are in the message
+    if N != 0:
+        while True:
+            key = data[idx]
+            idx += 1
+            if key == 204:
+                message_bytes = 7
+            elif key == 203:
+                message_bytes = 4
+            elif key == 201:
+                message_bytes = 8
+            elif key == 200:
+                message_bytes = 2
+            elif key == 202:
+                message_bytes = 8
+            else:
+                # If out of sync, just discard bytes until a valid key is found.
+                out_of_sync = True
+                if idx == N:
+                    break
+                else:
+                    continue
+            #Check if the whole message is in the remaining array
+            if idx + message_bytes > N:
+                idx -= 1 #set the index back one so the key is included in the remaining data
+                break
+            #Read the whole message
+            message = data[idx:idx+message_bytes]
+            idx += message_bytes
+
+            if key == 204:
+                counts[counts_idx] = (int(message[6]) << 48) | (int(message[5]) << 40) | (int(message[4]) << 32) | (int(message[3]) << 24) | (int(message[2]) << 16) | (int(message[1]) << 8) | int(message[0])
+                counts_idx += 1
+            else:
+                other_messages[other_messages_idx, 0] = key
+                other_messages[other_messages_idx, 1:message_bytes+1] = message[:message_bytes]
+                if other_messages_idx < 19:
+                    other_messages_idx += 1
+            # If the data array was the perfect length, return
+            if idx == N:
+                break
+    return counts, counts_idx, other_messages, other_messages_idx, data[idx:], out_of_sync

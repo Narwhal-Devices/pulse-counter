@@ -1,13 +1,10 @@
-from numba.cuda.errors import normalize_kernel_dimensions
 import numpy as np
-import pathlib
 import serial
 import serial.tools.list_ports
-import struct
 import queue
 import threading
 import time
-import transcode
+from . import transcode
 
 
 class PulseCounter():
@@ -27,7 +24,6 @@ class PulseCounter():
 
         self.connected = False
         self.connection_trys = 0
-        self.authantication_byte = None
         self.valid_ports = []
         
         self.connect_serial()
@@ -70,63 +66,6 @@ class PulseCounter():
                 time.sleep(1)
                 self.connect_serial()
 
-
-    def write_command(self, encoded_command):
-        # not really sure if this is the correct place to put this. 
-        # basically, what i need is that if the read_thread shits itself, the main thread will automatically safe close the connection, and then try to reconnect.
-        if self.read_thread_killed_itself:
-            self.safe_close_serial_port()
-            self.connect_serial()
-        try:
-            self.ser.write(encoded_command)
-        except Exception as ex:
-            print('write command failed')
-            self.safe_close_serial_port()
-
-    def monitor_serial(self):
-        bytes_dropped = False
-        self.read_thread_killed_itself = False
-        while not self.close_readthread_event.is_set():
-            try:
-                byte_message_identifier = self.ser.read(1)
-            except serial.serialutil.SerialException as ex:
-                self.close_readthread_event.set()
-                self.read_thread_killed_itself = True
-                break
-            
-            if byte_message_identifier:
-                message_identifier, = struct.unpack('B', byte_message_identifier)
-                if message_identifier in transcode.msgin_decodeinfo.keys():
-                    decode_function = transcode.msgin_decodeinfo[message_identifier]['decode_function']
-                    message_length = transcode.msgin_decodeinfo[message_identifier]['message_length'] - 1
-                    try:
-                        byte_message = self.ser.read(message_length)
-                    except serial.serialutil.SerialException as ex:
-                        self.close_readthread_event.set()
-                        self.read_thread_killed_itself = True
-                        break
-                    if len(byte_message) == message_length:
-                        message = decode_function(byte_message)
-                        #Now decide what you actually want to do with the different messages.
-                        if message_identifier == transcode.msgin_identifier['error']:
-                            print(message)
-                        elif message_identifier == transcode.msgin_identifier['echo']:
-                            self.authantication_byte = message['echoed_byte']
-                            # print(message)
-                            self.echo_queue.put(message)
-                        elif message_identifier == transcode.msgin_identifier['print']:
-                            print(message)
-                        elif message_identifier == transcode.msgin_identifier['devicestatus']:
-                            print(message)
-                            print(self.ser.in_waiting)
-                        elif message_identifier == transcode.msgin_identifier['pulserecord']:
-                            # print(message)  
-                            self.counter_queue.put((message['pulse_count'], bytes_dropped))
-                            bytes_dropped = False
-                            # print(self.ser.in_waiting)
-                else:
-                    bytes_dropped = True
-
     def check_authantication_byte(self):
         echoed_bytes = []
         while not self.echo_queue.empty:
@@ -148,7 +87,56 @@ class PulseCounter():
             time.sleep(1)
             print('attemping to reconnect')
             self.connect_serial()
-                
+
+    def write_command(self, encoded_command):
+        # not really sure if this is the correct place to put this. 
+        # basically, what i need is that if the read_thread shits itself, the main thread will automatically safe close the connection, and then try to reconnect.
+        if self.read_thread_killed_itself:
+            self.safe_close_serial_port()
+            self.connect_serial()
+        try:
+            self.ser.write(encoded_command)
+        except Exception as ex:
+            print('write command failed')
+            self.safe_close_serial_port()
+
+    def monitor_serial(self):
+        self.read_thread_killed_itself = False
+        remaining_data = np.array((), dtype=np.uint8)
+        while not self.close_readthread_event.is_set():
+            try:
+                if (bytes_waiting := self.ser.in_waiting):
+                    new_data = self.ser.read(bytes_waiting)
+                else:
+                    new_data = self.ser.read(1)
+            except serial.serialutil.SerialException as ex:
+                self.close_readthread_event.set()
+                self.read_thread_killed_itself = True
+                break
+            new_data_arr = np.array(list(new_data), dtype=np.uint8)
+            counts, counts_idx, other_messages, other_messages_idx, remaining_data, bytes_dropped = transcode.quick_decode(remaining_data, new_data_arr)
+
+            if bytes_dropped:
+                print('bytes dropped')
+
+            if counts_idx:
+                list(map(self.counter_queue.put, counts[:counts_idx]))
+
+            if other_messages_idx:
+                for message_arr in other_messages[:other_messages_idx]:
+                    message_identifier = message_arr[0]
+                    message_bytes = bytes(message_arr[1:transcode.msgin_decodeinfo[message_identifier]['message_length']])
+                    message = transcode.msgin_decodeinfo[message_identifier]['decode_function'](message_bytes)
+                    if message_identifier == transcode.msgin_identifier['devicestatus']:
+                        print(message)
+                    elif message_identifier == transcode.msgin_identifier['error']:
+                        print(message)
+                    elif message_identifier == transcode.msgin_identifier['echo']:
+                        # print(message)
+                        self.echo_queue.put(message)
+                    elif message_identifier == transcode.msgin_identifier['print']:
+                        print(message)
+
     def safe_close_serial_port(self):
         self.close_readthread_event.set()
         self.serial_read_thread.join()
@@ -196,18 +184,14 @@ class PulseCounter():
         command = transcode.encode_settings(request_status=True)
         self.write_command(command) 
 
-    def get_counts(self, timeout=None, indicate_bytes_dropped = False):
+    def get_counts(self, timeout=None):
         try:
-            counts, bytes_dropped = self.counter_queue.get(timeout=timeout)
+            counts = self.counter_queue.get(timeout=timeout)
         except queue.Empty as ex:
-            if indicate_bytes_dropped:
-                return None, None
-            else:
-                return None
-        if indicate_bytes_dropped:
-            return counts, bytes_dropped
-        else:
-            return counts
+            return None
+        return counts
+
+
 
 
 if __name__ == '__main__':
@@ -218,27 +202,11 @@ if __name__ == '__main__':
     #setup counter
     counter = PulseCounter()
     counter.purge_memory()
-    # time.sleep(10)
-    # t0 = time.time()
-    for a in range(50000):
-        counts, bytes_dropped = counter.get_counts(timeout=1, indicate_bytes_dropped=True)
-        # print(counts)
-        if bytes_dropped:
-            print('booo bytes dropped')
 
-        # if a % 1000 == 0:
-        #     counter.get_memory_usage()
-    # t1 = time.time()
-    # print((t1-t0)/1000)
-
-    # while (counts := counter.get_counts(timeout=0.1)) is not None:
-    #     print(counts)
-    # for a in range(5):
-    #     print(counter.get_counts(timeout=1))
-
-
-    # counter.write_command(transcode.encode_echo('a'.encode()))
-
+    for a in range(500000):
+        counts = counter.get_counts(timeout=1)
+        if a % 1000 == 0:
+            print(counts)
 
     counter.close()
 
