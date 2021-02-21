@@ -10,7 +10,7 @@ with open('LICENSE.txt') as f:
 
 setup(
     name='ndpulsecount',
-    version='0.0.1',
+    version='0.0.2',
     description='A package to interface with the Narwhal Devices Pulse Counter',
     long_description=readme,
     author='Rory Speirs',
